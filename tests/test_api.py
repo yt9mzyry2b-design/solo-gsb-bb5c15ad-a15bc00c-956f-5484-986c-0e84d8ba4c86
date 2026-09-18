@@ -85,6 +85,120 @@ def test_get_missing_audit_404(client):
     assert client.get("/api/audits/999").status_code == 404
 
 
+# ---------- 修复预演 ----------
+
+def test_repair_plan_keeps_and_replaces(client):
+    serials = [BASE, BASE + 1, BASE + 1, BASE - 5]
+    created = client.post("/api/audits", json={"zone": "example.com", "serials": serials})
+    audit_id = created.json()["id"]
+
+    resp = client.get(f"/api/audits/{audit_id}/repair-plan")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == audit_id
+    assert body["zone"] == "example.com"
+
+    items = body["items"]
+    assert [(i["index"], i["original"], i["effective"], i["action"]) for i in items] == [
+        (0, BASE, BASE, "keep"),        # 首项不变
+        (1, BASE + 1, BASE + 1, "keep"),  # 有效前进
+        (2, BASE + 1, BASE + 2, "replace"),  # 相等 → 上一修复值 +1
+        (3, BASE - 5, BASE + 3, "replace"),  # 相对修复后值倒退 → +1
+    ]
+    assert body["summary"] == {"total": 4, "replaced": 2}
+    # 替换原因逐项返回
+    assert "相等" in items[2]["reason"]
+    assert "倒退" in items[3]["reason"]
+    # 修复后序列相邻项均为有效前进
+    effectives = [i["effective"] for i in items]
+    assert all(classify(a, b) == "advance" for a, b in zip(effectives, effectives[1:]))
+
+
+def test_repair_plan_wraparound(client):
+    # 0 相对 MAX_SERIAL 是回绕前进（保留）；MAX_SERIAL 相对 0 是倒退（替换为 1）
+    serials = [MAX_SERIAL, 0, MAX_SERIAL]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    body = client.get(f"/api/audits/{audit_id}/repair-plan").json()
+    assert [(i["original"], i["effective"], i["action"]) for i in body["items"]] == [
+        (MAX_SERIAL, MAX_SERIAL, "keep"),
+        (0, 0, "keep"),
+        (MAX_SERIAL, 1, "replace"),
+    ]
+    assert body["summary"]["replaced"] == 1
+
+
+def test_repair_plan_replace_wraps_to_zero(client):
+    # 上一修复后值为 2^32-1 且原值相等时，替换值按 32 位无符号回绕为 0
+    serials = [MAX_SERIAL, MAX_SERIAL]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    items = client.get(f"/api/audits/{audit_id}/repair-plan").json()["items"]
+    assert items[1]["effective"] == 0
+    assert items[1]["action"] == "replace"
+    assert classify(items[0]["effective"], items[1]["effective"]) == "advance"
+
+
+def test_repair_plan_incomparable_replaced(client):
+    serials = [0, SERIAL_HALF]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    items = client.get(f"/api/audits/{audit_id}/repair-plan").json()["items"]
+    assert items[1]["action"] == "replace"
+    assert items[1]["effective"] == 1
+    assert "不可比较" in items[1]["reason"]
+
+
+def test_repair_plan_all_advance_kept(client):
+    serials = [MAX_SERIAL - 1, MAX_SERIAL, 0, 1]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com.", "serials": serials}
+    ).json()["id"]
+
+    body = client.get(f"/api/audits/{audit_id}/repair-plan").json()
+    assert all(i["action"] == "keep" for i in body["items"])
+    assert [i["effective"] for i in body["items"]] == serials
+    assert body["summary"] == {"total": 4, "replaced": 0}
+
+
+def test_repair_plan_single_serial(client):
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": [42]}
+    ).json()["id"]
+
+    body = client.get(f"/api/audits/{audit_id}/repair-plan").json()
+    assert body["items"] == [
+        {"index": 0, "original": 42, "effective": 42, "action": "keep",
+         "reason": body["items"][0]["reason"]}
+    ]
+    assert body["summary"] == {"total": 1, "replaced": 0}
+
+
+def test_repair_plan_not_persisted(client):
+    serials = [BASE, BASE - 5]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    client.get(f"/api/audits/{audit_id}/repair-plan")
+    # 原审计记录未被修改
+    stored = client.get(f"/api/audits/{audit_id}").json()
+    assert stored["serials"] == serials
+
+
+def test_repair_plan_missing_audit_404(client):
+    assert client.get("/api/audits/999/repair-plan").status_code == 404
+
+
+# ---------- 下一序列号建议 ----------
+
+
 def test_list_audits(client):
     client.post("/api/audits", json={"zone": "a.example", "serials": [1, 2]})
     client.post("/api/audits", json={"zone": "b.example", "serials": [2, 1]})

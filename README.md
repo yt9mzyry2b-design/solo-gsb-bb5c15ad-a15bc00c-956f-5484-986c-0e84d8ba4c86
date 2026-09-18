@@ -5,7 +5,8 @@
 - 客户端提交区域名与**按观测时间排列**的 32 位 serial 列表；
 - 服务端按 **RFC 1982** 模运算逐项判定 `advance`（前进）/ `regression`（倒退）/ `equal`（相等）/ `incomparable`（不可比较），并标出**可能使从服务器拒绝更新的节点**（`slave_reject_risk`）；
 - 提供 **YYYYMMDDnn** 风格的下一序列号建议，保证相对当前值为有效前进；当日编号耗尽或存在半区间歧义时返回 **409**；
-- 审计记录持久化于 SQLite，可按 ID 查询。
+- 审计记录持久化于 SQLite，可按 ID 查询；
+- 支持基于已有审计**即时生成序列修复预演**（不落库）：首个 serial 不变，其后各项与上一个修复后值按 RFC 1982 比较，非有效前进即替换为上一修复后值加 1（32 位无符号回绕）。
 
 ## 快速启动（单条命令）
 
@@ -30,6 +31,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `POST` | `/api/audits` | 提交审计，返回逐项判定结果（201） |
 | `GET` | `/api/audits/{id}` | 按 ID 查询审计记录（不存在返回 404） |
+| `GET` | `/api/audits/{id}/repair-plan` | 基于已有审计生成序列修复预演，不落库（不存在返回 404） |
 | `GET` | `/api/audits` | 审计记录列表（摘要，倒序） |
 | `GET` | `/api/next-serial?current=<serial>` | YYYYMMDDnn 下一序列号建议（歧义/耗尽返回 409） |
 | `GET` | `/health` | 健康检查 |
@@ -64,6 +66,32 @@ curl -s -X POST http://localhost:8000/api/audits \
 ```bash
 curl -s http://localhost:8000/api/audits/1
 ```
+
+### 序列修复预演
+
+对已提交审计即时生成修复方案，**结果不写入数据库**，也不修改原审计记录。首个 serial 保持不变；其后每项都与**上一个修复后值**按 RFC 1982 比较——有效前进则保留（`keep`），相等/倒退/不可比较时替换（`replace`）为上一个修复后值加 1，并按 32 位无符号整数（模 `2^32`）回绕。
+
+```bash
+curl -s http://localhost:8000/api/audits/1/repair-plan
+```
+
+```json
+{
+  "id": 1,
+  "zone": "example.com",
+  "created_at": "2026-09-18T08:00:00.000000Z",
+  "items": [
+    {"index": 0, "original": 2026091800, "effective": 2026091800, "action": "keep",    "reason": "首个观测值保持不变，作为修复序列的比较基准"},
+    {"index": 1, "original": 2026091801, "effective": 2026091801, "action": "keep",    "reason": "相对上一修复后值为 RFC 1982 有效前进，保留原值"},
+    {"index": 2, "original": 2026091801, "effective": 2026091802, "action": "replace", "reason": "与上一修复后值相等，未形成有效前进，替换为上一修复后值加 1"},
+    {"index": 3, "original": 2026091705, "effective": 2026091803, "action": "replace", "reason": "相对上一修复后值倒退，从服务器将拒绝更新，替换为上一修复后值加 1"}
+  ],
+  "summary": {"total": 4, "replaced": 2}
+}
+```
+
+- 每项返回 `original`（原始值）、`effective`（修复后生效值）、`action`（`keep`/`replace`）与 `reason`（保留或替换原因），`summary.replaced` 汇总替换数量；
+- 例如 `4294967295 → 4294967295` 会替换为 `0`（回绕后仍是有效前进）；审计 ID 不存在时返回 **404**。
 
 ### 下一序列号建议
 
@@ -110,6 +138,7 @@ app/
   main.py      # FastAPI 应用与路由（启动时初始化数据库）
   rfc1982.py   # RFC 1982 序列号算术
   suggest.py   # YYYYMMDDnn 下一序列号建议
+  repair.py    # 序列修复预演（不落库）
   service.py   # 逐项判定与汇总
   db.py        # SQLite 持久层
   schemas.py   # 请求/响应模型与校验

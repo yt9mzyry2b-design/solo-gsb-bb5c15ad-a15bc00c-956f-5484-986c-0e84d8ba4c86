@@ -76,6 +76,29 @@ class AuditListItem(BaseModel):
     risk_count: int
 
 
+class RepairPlanItem(BaseModel):
+    """修复预演中单个观测点的处理结果。"""
+
+    index: int
+    original: int = Field(description="原始观测序列号")
+    effective: int = Field(description="修复后生效的序列号（32 位无符号，模 2^32 回绕）")
+    action: Literal["keep", "replace"] = Field(description="keep=保留原值，replace=替换为上一修复后值加 1")
+    reason: str
+
+
+class RepairPlanSummary(BaseModel):
+    total: int
+    replaced: int = Field(description="被替换的观测点数量")
+
+
+class RepairPlanOut(BaseModel):
+    id: int
+    zone: str
+    created_at: str
+    items: list[RepairPlanItem]
+    summary: RepairPlanSummary
+
+
 class NextSerialOut(BaseModel):
     current: int
     next: int
