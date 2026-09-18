@@ -13,7 +13,9 @@ from .schemas import (
     AuditListItem,
     AuditOut,
     NextSerialOut,
+    RepairPlanOut,
 )
+from .repair import build_repair_plan
 from .service import analyze
 from .suggest import SuggestionError, suggest_next_serial
 
@@ -73,6 +75,25 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if record is None:
             raise HTTPException(status_code=404, detail="审计记录不存在")
         return record
+
+    @app.get("/api/audits/{audit_id}/repair-plan", response_model=RepairPlanOut)
+    def get_repair_plan(audit_id: int) -> dict:
+        """为已有审计生成不落库的序列修复预演。
+
+        首个 serial 保持不变；其后每项与上一个修复后值按 RFC 1982 比较，
+        有效前进则保留，否则替换为上一个修复后值加 1（32 位无符号回绕）。
+        """
+        record = db.get_audit(app.state.db_path, audit_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="审计记录不存在")
+        items, summary = build_repair_plan(record["serials"])
+        return {
+            "id": record["id"],
+            "zone": record["zone"],
+            "created_at": record["created_at"],
+            "items": items,
+            "summary": summary,
+        }
 
     @app.get("/api/next-serial", response_model=NextSerialOut)
     def next_serial(

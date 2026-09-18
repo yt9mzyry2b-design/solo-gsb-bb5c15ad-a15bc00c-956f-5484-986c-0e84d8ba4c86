@@ -30,6 +30,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | --- | --- | --- |
 | `POST` | `/api/audits` | 提交审计，返回逐项判定结果（201） |
 | `GET` | `/api/audits/{id}` | 按 ID 查询审计记录（不存在返回 404） |
+| `GET` | `/api/audits/{id}/repair-plan` | 序列修复预演（不落库，不存在返回 404） |
 | `GET` | `/api/audits` | 审计记录列表（摘要，倒序） |
 | `GET` | `/api/next-serial?current=<serial>` | YYYYMMDDnn 下一序列号建议（歧义/耗尽返回 409） |
 | `GET` | `/health` | 健康检查 |
@@ -64,6 +65,38 @@ curl -s -X POST http://localhost:8000/api/audits \
 ```bash
 curl -s http://localhost:8000/api/audits/1
 ```
+
+### 序列修复预演
+
+为已有审计生成一个**逐项严格单调前进**的修复序列，仅用于预演，**不会写库**、也不会修改原审计记录：
+
+```bash
+curl -s http://localhost:8000/api/audits/1/repair-plan
+```
+
+以上文提交的 `[2026091800, 2026091801, 2026091801, 2026091705]` 为例，响应为：
+
+```json
+{
+  "id": 1,
+  "zone": "example.com",
+  "created_at": "2026-09-18T08:00:00.000000Z",
+  "items": [
+    {"index": 0, "original": 2026091800, "effective": 2026091800, "action": "keep",    "reason": "首个观测值保持不变，作为修复序列的基准"},
+    {"index": 1, "original": 2026091801, "effective": 2026091801, "action": "keep",    "reason": "相对上一个修复后值为 RFC 1982 意义下的有效前进，保留原值"},
+    {"index": 2, "original": 2026091801, "effective": 2026091802, "action": "replace", "reason": "与上一个修复后值相等，不构成有效前进，替换为上一个修复后值加 1"},
+    {"index": 3, "original": 2026091705, "effective": 2026091803, "action": "replace", "reason": "相对上一个修复后值发生倒退，从服务器会拒绝更新，替换为上一个修复后值加 1"}
+  ],
+  "summary": {"total": 4, "kept": 2, "replaced": 2}
+}
+```
+
+修复规则：
+
+- 首个 serial 保持不变；
+- 其后每项都与**上一个修复后值**（而非原始值）按 RFC 1982 比较；为有效前进则 `keep`（`effective` 等于 `original`）；
+- 相等、倒退或相距恰好 `2^31`（不可比较）时 `replace`，`effective` 取上一个修复后值 `+ 1`，并按 32 位无符号整数回绕（如 `4294967295 → 0`）；
+- `summary.replaced` 为被替换的节点数量；审计 ID 不存在时返回 **404**。
 
 ### 下一序列号建议
 
@@ -110,6 +143,7 @@ app/
   main.py      # FastAPI 应用与路由（启动时初始化数据库）
   rfc1982.py   # RFC 1982 序列号算术
   suggest.py   # YYYYMMDDnn 下一序列号建议
+  repair.py    # 不落库的序列修复预演
   service.py   # 逐项判定与汇总
   db.py        # SQLite 持久层
   schemas.py   # 请求/响应模型与校验

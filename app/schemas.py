@@ -81,3 +81,29 @@ class NextSerialOut(BaseModel):
     next: int
     date: str = Field(description="建议所基于的日期（UTC，YYYYMMDD）")
     note: str
+
+
+class RepairPlanItem(BaseModel):
+    """序列修复预演中单个观测点的结果。"""
+
+    index: int
+    original: int = Field(description="原始观测序列号")
+    effective: int = Field(description="修复后生效的序列号")
+    action: Literal["keep", "replace"] = Field(
+        description="keep=原值构成有效前进予以保留；replace=已替换为上一个修复后值加 1"
+    )
+    reason: str = Field(description="保留或替换的原因")
+
+
+class RepairPlanSummary(BaseModel):
+    total: int
+    kept: int = Field(description="保留原值的观测点数量（含首个）")
+    replaced: int = Field(description="被替换的观测点数量")
+
+
+class RepairPlanOut(BaseModel):
+    id: int
+    zone: str
+    created_at: str
+    items: list[RepairPlanItem]
+    summary: RepairPlanSummary

@@ -85,6 +85,10 @@ def test_get_missing_audit_404(client):
     assert client.get("/api/audits/999").status_code == 404
 
 
+def test_repair_plan_missing_audit_404(client):
+    assert client.get("/api/audits/999/repair-plan").status_code == 404
+
+
 def test_list_audits(client):
     client.post("/api/audits", json={"zone": "a.example", "serials": [1, 2]})
     client.post("/api/audits", json={"zone": "b.example", "serials": [2, 1]})
@@ -110,6 +114,103 @@ def test_list_audits(client):
 )
 def test_invalid_payload_422(client, payload):
     assert client.post("/api/audits", json=payload).status_code == 422
+
+
+# ---------- 序列修复预演 ----------
+
+def test_repair_plan_keeps_advances_and_repairs_others(client):
+    # 前进保留；相等与倒退被替换，且比较基准是上一个修复后值
+    serials = [BASE, BASE + 1, BASE + 1, BASE - 5, BASE + 3]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    resp = client.get(f"/api/audits/{audit_id}/repair-plan")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == audit_id
+    assert body["zone"] == "example.com"
+
+    assert body["items"][0] == {
+        "index": 0,
+        "original": BASE,
+        "effective": BASE,
+        "action": "keep",
+        "reason": body["items"][0]["reason"],
+    }
+    assert "保持不变" in body["items"][0]["reason"]
+
+    # BASE -> BASE+1 前进，保留
+    assert body["items"][1]["action"] == "keep"
+    assert body["items"][1]["effective"] == BASE + 1
+    # 相等 -> 替换为 BASE+2
+    assert body["items"][2]["action"] == "replace"
+    assert body["items"][2]["effective"] == BASE + 2
+    # BASE-5 相对修复后值 BASE+2 倒退 -> 替换为 BASE+3
+    assert body["items"][3]["action"] == "replace"
+    assert body["items"][3]["effective"] == BASE + 3
+    # 原 BASE+3 与上一个修复后值 BASE+3 相等 -> 再替换为 BASE+4
+    assert body["items"][4]["action"] == "replace"
+    assert body["items"][4]["effective"] == BASE + 4
+
+    assert body["summary"] == {"total": 5, "kept": 2, "replaced": 3}
+
+    # 修复后序列逐项严格前进（RFC 1982）
+    effectives = [item["effective"] for item in body["items"]]
+    for prev, cur in zip(effectives, effectives[1:]):
+        assert classify(prev, cur) == "advance"
+
+
+def test_repair_plan_wraparound(client):
+    # 回绕边界：MAX_SERIAL 之后 0 是有效前进；倒退项替换时也需回绕
+    serials = [MAX_SERIAL - 1, MAX_SERIAL, MAX_SERIAL - 1]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    body = client.get(f"/api/audits/{audit_id}/repair-plan").json()
+    assert [i["action"] for i in body["items"]] == ["keep", "keep", "replace"]
+    assert [i["effective"] for i in body["items"]] == [
+        MAX_SERIAL - 1,
+        MAX_SERIAL,
+        0,
+    ]
+    assert body["summary"] == {"total": 3, "kept": 2, "replaced": 1}
+
+
+def test_repair_plan_incomparable_replaced(client):
+    # 与上一个修复后值相距恰好 2^31：不可比较，替换为 +1
+    serials = [0, SERIAL_HALF]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+
+    body = client.get(f"/api/audits/{audit_id}/repair-plan").json()
+    assert body["items"][1]["action"] == "replace"
+    assert body["items"][1]["effective"] == 1
+    assert "不可比较" in body["items"][1]["reason"]
+    assert body["summary"] == {"total": 2, "kept": 1, "replaced": 1}
+
+
+def test_repair_plan_single_serial(client):
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": [42]}
+    ).json()["id"]
+    body = client.get(f"/api/audits/{audit_id}/repair-plan").json()
+    assert body["items"][0]["action"] == "keep"
+    assert body["items"][0]["effective"] == 42
+    assert body["summary"] == {"total": 1, "kept": 1, "replaced": 0}
+
+
+def test_repair_plan_is_not_persisted(client):
+    serials = [1, 1]
+    audit_id = client.post(
+        "/api/audits", json={"zone": "example.com", "serials": serials}
+    ).json()["id"]
+    client.get(f"/api/audits/{audit_id}/repair-plan")
+    # 原始审计记录不受预演影响
+    record = client.get(f"/api/audits/{audit_id}").json()
+    assert record["serials"] == serials
 
 
 # ---------- 下一序列号建议 ----------
